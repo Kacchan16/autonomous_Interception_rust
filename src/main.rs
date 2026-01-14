@@ -3,8 +3,10 @@ use rand::Rng;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Target {
+    // Position in meters
     x: f64,
     y: f64,
+    // Velocity components in m/step
     vx: f64,
     vy: f64,
 }
@@ -16,12 +18,14 @@ impl Target {
 
     fn update(&mut self) {
         // Update position based on velocity
-        self.x += self.vx;
-        self.y += self.vy;
+        // Advance position using the current velocity
+        self.x += self.vx; // position = velocity * time
+        self.y += self.vy; // position = velocity * time
     }
 
     fn distance_to(&self, other: &Target) -> f64 {
         // Calculate distance to another projectile
+        // Euclidean distance between two projectiles
         let dx = self.x - other.x;
         let dy = self.y - other.y;
         (dx * dx + dy * dy).sqrt()
@@ -31,13 +35,115 @@ impl Target {
 pub type Interceptor = Target;
 
 // Calculate steering direction towards target (unit vector)
+// Calculate unit steering direction from interceptor towards target
 fn calculate_steering_direction(from: &Interceptor, to: &Target) -> (f64, f64) {
-    let dx = to.x - from.x;
-    let dy = to.y - from.y;
-    let distance = (dx * dx + dy * dy).sqrt();
-    
-    (dx / distance, dy / distance)
+    // ----------------------------
+    // Line of sight (LOS)
+    // ----------------------------
+    let rx = to.x - from.x;
+    let ry = to.y - from.y;
+    let r = (rx * rx + ry * ry).sqrt();
 
+    // If we're already at the target (or numerically too close), return no direction.
+    if r < 1e-9 {
+        return (0.0, 0.0);
+    }
+
+    // Target velocity (available in Target struct)
+    let tvx = to.vx;
+    let tvy = to.vy;
+    let tv = (tvx * tvx + tvy * tvy).sqrt();
+
+    // Interceptor speed magnitude (available in Interceptor/Target struct)
+    // Use a small floor to avoid division by zero.
+    let ivx = from.vx;
+    let ivy = from.vy;
+    let iv = (ivx * ivx + ivy * ivy).sqrt().max(1e-6);
+
+    // ----------------------------
+    // 1) Lead pursuit (far range)
+    // ----------------------------
+    // Simple time-to-go estimate and clamp for stability.
+    let t_go = (r / iv).clamp(0.0, 3.0);
+    let lead_x = to.x + tvx * t_go;
+    let lead_y = to.y + tvy * t_go;
+
+    // Default aim point is the lead point
+    let mut aim_x = lead_x;
+    let mut aim_y = lead_y;
+
+    // ----------------------------
+    // 2) Terminal angle forcing (close range)
+    //    Rotate LOS by +/- theta to guarantee a crossing component.
+    // ----------------------------
+    let terminal_dist = 300.0;      // start forcing inside this distance (tune 500..3000)
+      // force this approach angle (tune 15..35)
+    
+    let terminal_angle_deg: f64 = 25.0;
+    let theta = terminal_angle_deg.to_radians();
+
+    if r < terminal_dist {
+        // Unit LOS
+        let lx = rx / r;
+        let ly = ry / r;
+
+        // Choose a consistent side using the sign of cross(LOS, target_vel)
+        // cross = lx*tvy - ly*tvx
+        let mut sign = 1.0;
+        if tv > 1e-6 {
+            let cross = lx * tvy - ly * tvx;
+            if cross < 0.0 {
+                sign = -1.0;
+            }
+        }
+
+        // Rotate LOS by +/- theta
+        let c = theta.cos();
+        let s = theta.sin() * sign;
+
+        let dirx = lx * c - ly * s;
+        let diry = lx * s + ly * c;
+
+        // Create a stable aim point along that rotated direction
+        let aim_step = 300.0; // tune 100..600
+        aim_x = from.x + dirx * aim_step;
+        aim_y = from.y + diry * aim_step;
+    } else {
+        // ----------------------------
+        // Optional: mild lateral offset even when far, to avoid pure tail-chase.
+        // (Keeps things robust if terminal mode starts late.)
+        // ----------------------------
+        if tv > 1e-6 {
+            // Perp to target velocity (unit)
+            let mut nx = -tvy / tv;
+            let mut ny = tvx / tv;
+
+            // Keep side consistent using cross(relative_pos, target_vel)
+            let cross = rx * tvy - ry * tvx;
+            if cross < 0.0 {
+                nx = -nx;
+                ny = -ny;
+            }
+
+            // Small offset that grows with distance but is capped
+            let offset = (0.06 * r).clamp(0.0, 120.0);
+            aim_x = lead_x + nx * offset;
+            aim_y = lead_y + ny * offset;
+        }
+    }
+
+    // ----------------------------
+    // Convert aim point to a unit steering direction
+    // ----------------------------
+    let sx = aim_x - from.x;
+    let sy = aim_y - from.y;
+    let s = (sx * sx + sy * sy).sqrt();
+
+    if s < 1e-9 {
+        (0.0, 0.0)
+    } else {
+        (sx / s, sy / s)
+    }
 }
 
 // Calculate angle between two velocity vectors in degrees
@@ -56,25 +162,27 @@ fn calculate_angle_between_vectors(vx1: f64, vy1: f64, vx2: f64, vy2: f64) -> f6
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize projectiles
-    let mut target = Target::new(0.0, 30.0, 2.0, 0.0); // Red/Target: 30m height, horizontal
-    let mut interceptor = Interceptor::new(0.0, 0.0, 0.0, 0.0); // Green/Interceptor: at ground level
-    let interceptor_speed = 2.5; // Speed of interceptor projectile
+    // Initial conditions: target starts elevated and moving right; interceptor on ground
+    let mut target = Target::new(0.0, 30.0, 2.0, 0.0);
+    let mut interceptor = Interceptor::new(0.0, 0.0, 0.0, 0.0);
+    let interceptor_speed = 2.5; // Constant interceptor speed (m/step)
     let mut rng = rand::thread_rng();
 
+    // Traces for plotting and collision reporting
     let mut target_positions = vec![];
     let mut interceptor_positions = vec![];
     let mut collision_point: Option<(f64, f64)> = None;
     let mut collision_angle: Option<f64> = None;
 
-    let collision_threshold = 1.0; // Stop at < 1m distance
+    let collision_threshold = 0.5; // Stop when closer than 0.5 m
     
-    let target_initial_height = 30.0; // Initial/target height for correction
-    let correction_weight = 0.6; // Weight of correction (0.0 = pure random, 1.0 = pure correction)
-    let p_gain = 0.2; // P-Regler Verstärkung (Proportional gain)
+    // Parameters that shape the target's evasive behavior
+    let target_initial_height = 30.0; // Reference height for P correction
+    let correction_weight = 0.8; // Blend between random and corrective steering Weight of correction (0.0 = pure random, 1.0 = pure correction)
+    let p_gain = 0.2; // Proportional gain for height error
 
-    // Simulation for 1000 time steps
-    for _step in 0..1000 {
+    // Run discrete-time simulation
+    for _step in 0..10000 {
         // Collision detection before update: check if we're already close
         let distance = interceptor.distance_to(&target);
         
@@ -88,12 +196,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
         
-        // Add random deviation to target's velocity between -5° and +5°
+        // Random deviation to target's heading between -5° and +5°
         let random_angle_deg: f64 = rng.gen_range(-5.0..5.0);
         
-        // P-Regler: Correction angle proportional to height error
-        let height_error = target.y - target_initial_height;
-        let correction_angle_deg = -height_error * p_gain; // Negative because we want to correct upward when below target
+        // P controller: correction angle proportional to height error
+        let height_error = target.y - target_initial_height; // Positive if above reference
+        let correction_angle_deg = -height_error * p_gain; // Negative drives back up when below target height
         
         // Blend random angle and correction angle based on weight
         let blended_angle_deg = (random_angle_deg * (1.0 - correction_weight)) 
@@ -110,7 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         target.vx = rotated_vx;
         target.vy = rotated_vy;
         
-        // Interceptor steers directly towards target
+        // Interceptor points directly toward the target every step
         let (mut dir_x, mut dir_y) = calculate_steering_direction(&interceptor, &target);
         
         // Normalize direction vector
@@ -123,11 +231,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         interceptor.vx = dir_x * interceptor_speed;
         interceptor.vy = dir_y * interceptor_speed;
 
-        // Update positions
+        // Move both actors one time step
         target.update();
         interceptor.update();
 
-        // Store positions (both X and Y coordinates)
+        // Store positions (both X and Y coordinates) // Store history for visualization
         target_positions.push((target.x, target.y));
         interceptor_positions.push((interceptor.x, interceptor.y));
         
@@ -135,9 +243,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Print collision results after simulation ends
     if collision_point.is_some() {
-        if let Some((step_x, _)) = collision_point {
-            println!("✅ Collision occurred at step {}", step_x as usize);
-        }
+        if let Some((cx, cy)) = collision_point {
+            println!("✅ Collision at position x={:.1}, y={:.1}", cx, cy);
+        }        
         if let Some(angle) = collision_angle {
             if angle > 5.0 {
                 println!("✅ Angle between velocities is: {:.2}° (greater than 5°)", angle);
@@ -146,7 +254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     } else {
-        println!("❌ No collision occurred within 1000 time steps");
+        println!("❌ No collision occurred within 10000 time steps");
     }
 
     // Visualization
@@ -161,10 +269,10 @@ fn visualize_simulation(
     target_positions: &[(f64, f64)],
     interceptor_positions: &[(f64, f64)],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let root = BitMapBackend::new("collision_simulation.png", (1400, 900)).into_drawing_area();
+    let root = BitMapBackend::new("collision_simulation0.png", (1400, 900)).into_drawing_area();
     root.fill(&WHITE)?;
 
-    // Calculate dynamic boundaries based on data
+    // Dynamic plot bounds based on recorded trajectories
     let max_x = target_positions
         .iter()
         .chain(interceptor_positions.iter())
@@ -179,8 +287,9 @@ fn visualize_simulation(
         .fold(0.0, f64::max)
         .max(10.0) * 1.1; // Add 10% padding
 
+    // Configure chart canvas and axes
     let mut chart = ChartBuilder::on(&root)
-        .caption("Target vs Interceptor Simulation (Stop at <1m distance)", ("sans-serif", 30))
+        .caption("Target vs Interceptor Simulation (Stop at <0.5m distance)", ("sans-serif", 30))
         .margin(15)
         .x_label_area_size(40)
         .y_label_area_size(50)
@@ -205,7 +314,7 @@ fn visualize_simulation(
         ))?
         .label("Interceptor (pursuing)");
 
-    // Draw points for target
+    // Draw point markers for the target
     for pos in target_positions.iter() {
         chart.draw_series(std::iter::once(Circle::new(
             *pos,
@@ -214,7 +323,7 @@ fn visualize_simulation(
         )))?;
     }
 
-    // Draw points for interceptor
+    // Draw point markers for the interceptor
     for pos in interceptor_positions.iter() {
         chart.draw_series(std::iter::once(Circle::new(
             *pos,
@@ -223,7 +332,7 @@ fn visualize_simulation(
         )))?;
     }
 
-    // Draw blue circle at the last position of interceptor
+    // Highlight last interceptor position (proxy for collision point)
     if let Some(&last_interceptor_pos) = interceptor_positions.last() {
         let (collision_x, collision_y) = last_interceptor_pos;
         
@@ -245,7 +354,7 @@ fn visualize_simulation(
         .draw()?;
 
     root.present()?;
-    println!("✅ Graph saved as 'collision_simulation.png'");
+    println!("✅ Graph saved as 'collision_simulation0.png'");
 
     Ok(())
 }
