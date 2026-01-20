@@ -1,5 +1,6 @@
 use plotters::prelude::*;
 use rand::Rng;
+const TERMINAL_DIST: f64 = 12.0;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Target {
@@ -33,6 +34,14 @@ impl Target {
 }
 
 pub type Interceptor = Target;
+
+
+// const TERMINAL_DIST: f64 = 30.0;
+// let terminal_angle_deg: f64 = 35.0;
+// let aim_step = TERMINAL_DIST * 2.0;
+// let interceptor_speed = 2.0;
+// let random_angle_deg: f64 = rng.gen_range(-10.0..10.0);
+// let p_gain = 0.35;
 
 // Calculate steering direction towards target (unit vector)
 // Calculate unit steering direction from interceptor towards target
@@ -76,13 +85,13 @@ fn calculate_steering_direction(from: &Interceptor, to: &Target) -> (f64, f64) {
     // 2) Terminal angle forcing (close range)
     //    Rotate LOS by +/- theta to guarantee a crossing component.
     // ----------------------------
-    let terminal_dist = 300.0;      // start forcing inside this distance (tune 500..3000)
+     // start forcing inside this distance (tune 500..3000)
       // force this approach angle (tune 15..35)
     
-    let terminal_angle_deg: f64 = 25.0;
+    let terminal_angle_deg: f64 = 30.0;
     let theta = terminal_angle_deg.to_radians();
 
-    if r < terminal_dist {
+    if r < TERMINAL_DIST {
         // Unit LOS
         let lx = rx / r;
         let ly = ry / r;
@@ -105,7 +114,7 @@ fn calculate_steering_direction(from: &Interceptor, to: &Target) -> (f64, f64) {
         let diry = lx * s + ly * c;
 
         // Create a stable aim point along that rotated direction
-        let aim_step = 300.0; // tune 100..600
+        let aim_step = TERMINAL_DIST; // tune 100..600
         aim_x = from.x + dirx * aim_step;
         aim_y = from.y + diry * aim_step;
     } else {
@@ -126,7 +135,7 @@ fn calculate_steering_direction(from: &Interceptor, to: &Target) -> (f64, f64) {
             }
 
             // Small offset that grows with distance but is capped
-            let offset = (0.06 * r).clamp(0.0, 120.0);
+            let offset = (0.06 * r).clamp(0.0, 25.0);
             aim_x = lead_x + nx * offset;
             aim_y = lead_y + ny * offset;
         }
@@ -173,20 +182,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut interceptor_positions = vec![];
     let mut collision_point: Option<(f64, f64)> = None;
     let mut collision_angle: Option<f64> = None;
+    // const TERMINAL_DIST: f64 = 10.0;
 
-    let collision_threshold = 0.5; // Stop when closer than 0.5 m
+    let mut terminal_entry_points: Option<((f64, f64), (f64, f64))> = None; //interceptor        target
+    let mut prev_distance = f64::INFINITY;
+    let collision_threshold = 1.0; // Stop when closer than 1m, 0.5 m
     
     // Parameters that shape the target's evasive behavior
     let target_initial_height = 30.0; // Reference height for P correction
-    let correction_weight = 0.8; // Blend between random and corrective steering Weight of correction (0.0 = pure random, 1.0 = pure correction)
+    let correction_weight = 0.6; // Blend between random and corrective steering Weight of correction (0.0 = pure random, 1.0 = pure correction)
     let p_gain = 0.2; // Proportional gain for height error
 
     // Run discrete-time simulation
     for _step in 0..10000 {
         // Collision detection before update: check if we're already close
-        let distance = interceptor.distance_to(&target);
+        let distance_before = interceptor.distance_to(&target);
         
-        if distance < collision_threshold {
+        if distance_before < collision_threshold {
             collision_point = Some((target.x, target.y));
             
             // Calculate angle between velocity vectors
@@ -218,6 +230,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         target.vx = rotated_vx;
         target.vy = rotated_vy;
         
+        let distance_after = interceptor.distance_to(&target);
+        // Capture FIRST entry into terminal range
+        if prev_distance >= TERMINAL_DIST
+            && distance_after < TERMINAL_DIST
+            && terminal_entry_points.is_none()
+        {
+            terminal_entry_points = Some((
+                (interceptor.x, interceptor.y),
+                (target.x, target.y),
+            ));
+        }
+        prev_distance = distance_after;
+
+
         // Interceptor points directly toward the target every step
         let (mut dir_x, mut dir_y) = calculate_steering_direction(&interceptor, &target);
         
@@ -245,6 +271,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if collision_point.is_some() {
         if let Some((cx, cy)) = collision_point {
             println!("✅ Collision at position x={:.1}, y={:.1}", cx, cy);
+        }
+        if let Some(((ax, ay), (bx, by))) = terminal_entry_points {
+            println!("✅ Interceptor terminal entry at x={:.1}, y={:.1}", ax, ay);
+            println!("✅ Target terminal entry at x={:.1}, y={:.1}", bx, by);
         }        
         if let Some(angle) = collision_angle {
             if angle > 5.0 {
@@ -258,7 +288,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Visualization
-    visualize_simulation(&target_positions, &interceptor_positions)?;
+    visualize_simulation(&target_positions, &interceptor_positions, terminal_entry_points)?;
 
     Ok(())
 }
@@ -268,6 +298,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn visualize_simulation(
     target_positions: &[(f64, f64)],
     interceptor_positions: &[(f64, f64)],
+    terminal_entry_points: Option<((f64, f64), (f64, f64))>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let root = BitMapBackend::new("collision_simulation0.png", (1400, 900)).into_drawing_area();
     root.fill(&WHITE)?;
@@ -289,7 +320,7 @@ fn visualize_simulation(
 
     // Configure chart canvas and axes
     let mut chart = ChartBuilder::on(&root)
-        .caption("Target vs Interceptor Simulation (Stop at <0.5m distance)", ("sans-serif", 30))
+        .caption("Target vs Interceptor Simulation (Stop at <1m distance)", ("sans-serif", 30))
         .margin(15)
         .x_label_area_size(40)
         .y_label_area_size(50)
@@ -342,7 +373,26 @@ fn visualize_simulation(
             ShapeStyle::from(&BLUE).stroke_width(3),
         )))?;
     }
-
+    if let Some(((ix, iy), (tx, ty))) = terminal_entry_points {
+        let size = 0.40;
+    
+        // Interceptor terminal entry — X marker (black)
+        chart.draw_series(std::iter::once(PathElement::new(
+            vec![(ix - size, iy - size), (ix + size, iy + size)],
+            ShapeStyle::from(&BLACK).stroke_width(3),
+        )))?;
+        chart.draw_series(std::iter::once(PathElement::new(
+            vec![(ix - size, iy + size), (ix + size, iy - size)],
+            ShapeStyle::from(&BLACK).stroke_width(3),
+        )))?;
+    
+        // Target terminal entry — circle (blue)
+        chart.draw_series(std::iter::once(Circle::new(
+            (tx, ty),
+            7,
+            ShapeStyle::from(&BLUE).filled(),
+        )))?;
+    }    
 
     // Configure axes
     chart
