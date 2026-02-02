@@ -73,7 +73,7 @@ fn calculate_steering_direction(from: &Interceptor, to: &Target) -> (f64, f64) {
     // 1) Lead pursuit (far range)
     // ----------------------------
     // Simple time-to-go estimate and clamp for stability.
-    let t_go = (r / iv).clamp(0.0, 3.0);
+    let t_go = (r / iv).clamp(0.0, 6.0);
     let lead_x = to.x + tvx * t_go;
     let lead_y = to.y + tvy * t_go;
 
@@ -128,6 +128,9 @@ fn calculate_steering_direction(from: &Interceptor, to: &Target) -> (f64, f64) {
             let mut ny = tvx / tv;
 
             // Keep side consistent using cross(relative_pos, target_vel)
+            // CROSS = vector X Velocity
+            // In close range, sign decides rotation direction
+            // In far range, sign decides offset direction
             let cross = rx * tvy - ry * tvx;
             if cross < 0.0 {
                 nx = -nx;
@@ -194,7 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let p_gain = 0.2; // Proportional gain for height error
 
     // Run discrete-time simulation
-    for _step in 0..10000 {
+    for _step in 0..1000 {
         // Collision detection before update: check if we're already close
         let distance_before = interceptor.distance_to(&target);
         
